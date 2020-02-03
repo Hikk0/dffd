@@ -1,0 +1,283 @@
+#include <MCP3008.h>
+#include "Filter.h"
+#include <Wire.h>
+#include <Adafruit_INA219.h>
+#include <SolarPosition.h>
+//ADC czujniki swiatla
+#define CS_PIN 12 
+#define CLOCK_PIN 9
+#define MOSI_PIN 11
+#define MISO_PIN 10
+MCP3008 adc(CLOCK_PIN, MOSI_PIN, MISO_PIN, CS_PIN);
+Adafruit_INA219 ina219; 
+/*
+ układ fotodiod
+        ---
+ d1--d2-|-d6--d4
+ |   |  | |   |
+ d3--d5-|-d8--d7
+ */
+ //silniki
+const int dirpoz = 2;  // kierunek poziomy 
+const int steppoz = 3; // krok poziomy
+const int dirpio = 4;  // kierunek pionowy 
+const int steppio = 5; // krok pionowy
+int pozx=0; //pozycja pozioma
+int pozy=0; // pozycja pionowa
+int uchybx=0;   // uchyb regulacji w poziomie
+int uchyby=0;   // uchyb regulacji w pionie
+int gx = 0; //kąt padania promieni w poziomie
+int gy = 40; // kąt padania promieni w pionie 
+//czas
+unsigned long t = 0;
+unsigned long t1 = 0;
+unsigned long t2 =0;
+//regulacja
+int p=0 ;
+int o=0 ;
+int dioda;
+int poprzedni=0;
+//sun position
+const uint8_t digits = 3;// number of decimal digits to print
+SolarPosition Lublin(51.25, 22.56667); // Lublin,Polska
+// create a fixed UNIX time to test fixed time method
+int someS = 0;  //second
+int someM = 57;  //minute
+int someH = 14-1; //hour
+int someD = 29; //day
+int someMo = 1; //month
+int someY = 2020; //year
+tmElements_t someTime = {someS, someM, someH, 0, someD, someMo, CalendarYrToTm(someY) };
+time_t someEpochTime = makeTime(someTime);
+void setup() {
+ pinMode(dirpoz,OUTPUT); 
+ pinMode(steppoz,OUTPUT);
+ pinMode(dirpio,OUTPUT); 
+ pinMode(steppio,OUTPUT);
+ Serial.begin(115200);
+  uint32_t currentFrequency;
+  ina219.begin();
+  ina219.setCalibration_32V_1A();
+  setTime(someEpochTime);
+  SolarPosition::setTimeProvider(now);
+  //gy = Lublin.getSolarAzimuth();
+ // gx = 180 - Lublin.getSolarElevation();
+}
+
+void loop() {
+  bool reg=false;
+  t= millis();                               //zegar
+  if(t-t2>=5000){
+  parametry();
+  t2=t;}
+ if(cien()&&t-t1>=10000UL){
+  t1=t;                                      //czas pomiędzy kolejnym sprawdzeniem cienia
+  zrobKrok(pozx,pozy,gx,gy,uchybx,uchyby);
+  reg=true;
+ }
+ //Serial.println(avr());
+ //delay(300);
+ if(reg)
+ regulacja(p,o);
+ //parametry();
+ //delay(5000); 
+}
+boolean cien(){
+  bool c = false;
+  int suma;
+  int pomiar[10];
+  for (int i=0; i<8; i++) {
+    suma=0;
+    for(int o=0;o<10;o++){
+      pomiar[o]= adc.readADC(i);
+      suma=suma+pomiar[o];
+    }
+    if((suma/10)>300&&poprzedni<=(suma/10))
+    c =true;
+  }
+  return c;
+}
+void znajdzCien(int &cc,int &ll){
+  int  maxx = 0;
+  int val[8];
+  int pomiar[10];
+  int suma;
+  for (int i=0; i<8; i++) {
+    suma=0;
+    for(int o=0;o<10;o++){
+      pomiar[o]= adc.readADC(i);
+      suma=suma+pomiar[o];
+    }
+   val[i]=suma/10;
+    if(val[i]>maxx)
+    maxx = val[i];
+  }
+  for(int i=0;i<8;i++){
+    if(maxx==val[i])
+    cc=(i+1);
+  }
+  ll=maxx;
+}
+void stepx(int &p, int d,int t){
+  if(d>0){
+    digitalWrite(dirpoz,HIGH);
+    for(int i=0;i<d;i++){
+      digitalWrite(steppoz,HIGH);
+      delayMicroseconds(t);
+      digitalWrite(steppoz,LOW);
+      delayMicroseconds(t);
+      p++;
+    }
+  }
+  if(d<0){
+    digitalWrite(dirpoz,LOW);
+    for(int i=0;i>d;i--){
+      digitalWrite(steppoz,HIGH);
+      delayMicroseconds(t);
+      digitalWrite(steppoz,LOW);
+      delayMicroseconds(t);
+      p--;
+    }
+  }
+}
+void stepy(int &p, int d,int t){
+  if(d>0){
+    digitalWrite(dirpio,HIGH);
+    for(int i=0;i<d;i++){
+      digitalWrite(steppio,HIGH);
+      delayMicroseconds(t);
+      digitalWrite(steppio,LOW);
+      delayMicroseconds(t);
+      p++;
+    }
+  }
+  if(d<0){
+    digitalWrite(dirpio,LOW);
+    for(int i=0;i>d;i--){
+        digitalWrite(steppio,HIGH);
+        delayMicroseconds(t);
+        digitalWrite(steppio,LOW);
+        delayMicroseconds(t);
+        p--;
+    }
+  }
+}
+int obliczKrok(int &ppoz,int &ppio,int gx,int gy,int &x,int &y){
+  znajdzCien(dioda,poprzedni);
+  if(dioda==1){
+    x=((((-25-(gx/2))*512)/90)-ppoz);
+    y=((((22-(gy/2))*512)/90)-ppio);
+  }
+  else if(dioda==2){
+    x=((((-18-(gx/2))*512)/90)-ppoz);
+    y=((((29-(gy/2))*512)/90)-ppio);
+  }
+  else if(dioda==3){
+    x=((((-15-(gx/2))*512)/90)-ppoz);
+    y=((((16-(gy/2))*512)/90)-ppio);
+  }
+  else if(dioda==4){
+    x=((((28-(gx/2))*512)/90)-ppoz);
+    y=((((25-(gy/2))*512)/90)-ppio);
+  }
+  else if(dioda==5){
+    x=((((-8-(gx/2))*512)/90)-ppoz);
+    y=((((19-(gy/2))*512)/90)-ppio);
+  }
+  else if(dioda==6){
+    x=((((10-(gx/2))*512)/90)-ppoz);
+    y=((((32-(gy/2))*512)/90)-ppio);
+  }
+  else if(dioda==7){
+    x=((((15-(gx/2))*512)/90)-ppoz); 
+    y=((((18-(gy/2))*512)/90)-ppio);
+  }
+  else if(dioda==8){
+    x=((((4-(gx/2))*512)/90)-ppoz);
+    y=((((19-(gy/2))*512)/90)-ppio);
+  }
+    else{}
+}
+
+void zrobKrok(int &ppoz,int &ppio,int gx,int gy,int &x,int &y){
+  obliczKrok(ppoz,ppio,gx,gy,x,y);
+  stepy(ppio,-ppio,8000);
+  stepx(ppoz,x,8000);
+}
+
+/*int average(){
+  int pomiar[100];
+  long int sum=0;
+  for(int i=0;i<100;i++){
+    pomiar[i]=adc.readADC(dioda-1);
+    sum=sum+pomiar[i];
+    //delayMicroseconds(1);
+  }
+  return (sum/100);
+}*/
+int filtr(){
+  ExponentialFilter<long> Cien(20, 0);
+  int Pomiar = adc.readADC(dioda-1);
+  Cien.Filter(Pomiar);
+  return Cien.Current();
+  delay(100);
+}
+
+void regulacja(int &pp,int &oo){
+ for(int i=0;i<2;i++){
+  oo=filtr();
+ do{
+    stepy(pozy,-10,80000);
+    pp=oo;
+    oo=filtr();
+    if(pozy<-200){
+    stepy(pozy,-pozy,20000);
+    break;}
+  }while(pp-oo>-2);
+ }
+  stepy(pozy,10,10000);
+ }
+ 
+void parametry(void) {
+  float shuntvoltage = 0;
+  float busvoltage = 0;
+  float current_mA = 0;
+  float loadvoltage = 0;
+  float power_mW = 0;
+
+  shuntvoltage = ina219.getShuntVoltage_mV();
+  busvoltage = ina219.getBusVoltage_V();
+  current_mA = ina219.getCurrent_mA();
+  power_mW = ina219.getPower_mW();
+  loadvoltage = busvoltage + (shuntvoltage / 1000);
+  
+  //Serial.print("Napięcie magistrali:  "); Serial.print(busvoltage); Serial.println(" V");
+ 
+  Serial.println("Parametry pracy panelu fotowoltaicznego");
+  Serial.print("Napięcie bocznika :   "); Serial.print(shuntvoltage); Serial.println(" mV");
+  Serial.print("Napięcie obciążenia:  "); Serial.print(loadvoltage); Serial.println(" V");
+  Serial.print("Prąd:                 "); Serial.print(current_mA); Serial.println(" mA");
+  Serial.print("Moc:                  "); Serial.print(power_mW); Serial.println(" mW");
+  Serial.println("");
+
+  delay(100);
+}
+void printTime(time_t t)
+{
+  tmElements_t someTime;
+  breakTime(t, someTime);
+
+  Serial.print(someTime.Hour);
+  Serial.print(F(":"));
+  Serial.print(someTime.Minute);
+  Serial.print(F(":"));
+  Serial.print(someTime.Second);
+  Serial.print(F(" UTC on "));
+  Serial.print(dayStr(someTime.Wday));
+  Serial.print(F(", "));
+  Serial.print(monthStr(someTime.Month));
+  Serial.print(F(" "));
+  Serial.print(someTime.Day);
+  Serial.print(F(", "));
+  Serial.println(tmYearToCalendar(someTime.Year));
+}
